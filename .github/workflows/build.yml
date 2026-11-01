@@ -34,6 +34,8 @@ jobs:
           # 把 App 名稱改成 金爵國際（加入主畫面時顯示的名字）
           sed -i 's/"name": "dispatch_app"/"name": "金爵國際"/; s/"short_name": "dispatch_app"/"short_name": "金爵國際"/' app/web/manifest.json
           sed -i 's/content="dispatch_app"/content="金爵國際"/; s#<title>dispatch_app</title>#<title>金爵國際</title>#' app/web/index.html
+          # 安裝定位和開地圖用的套件
+          cd app && flutter pub add geolocator url_launcher
 
       - name: 打包網頁版
         working-directory: app
