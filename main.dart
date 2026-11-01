@@ -1,4 +1,7 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ===================================================
 // 金爵國際 出勤管理
@@ -167,6 +170,7 @@ class Hostess {
   String phone;
   String password;
   bool approved; // 自己註冊的帳號要管理員核准才能登入
+  bool locationConsent = false; // 是否已同意打卡時記錄位置
   Hostess({
     required this.id,
     required this.name,
@@ -176,12 +180,28 @@ class Hostess {
   });
 }
 
+// 一個定位點
+class LocationPoint {
+  final double lat;
+  final double lng;
+  final double accuracy; // 誤差（公尺）
+  LocationPoint({required this.lat, required this.lng, required this.accuracy});
+}
+
 // 一次上班（打卡上班 ～ 打卡下班）
 class Attendance {
   final String hostessId;
   final DateTime clockIn;
   DateTime? clockOut;
-  Attendance({required this.hostessId, required this.clockIn, this.clockOut});
+  LocationPoint? inLoc; // 上班打卡位置
+  LocationPoint? outLoc; // 下班打卡位置
+  Attendance({
+    required this.hostessId,
+    required this.clockIn,
+    this.clockOut,
+    this.inLoc,
+    this.outLoc,
+  });
 }
 
 // 一次外出（出發 ～ 回店）
@@ -190,11 +210,15 @@ class Dispatch {
   final String place;
   final DateTime outTime;
   DateTime? backTime;
+  LocationPoint? outLoc; // 出發時位置
+  LocationPoint? backLoc; // 回店時位置
   Dispatch({
     required this.hostessId,
     required this.place,
     required this.outTime,
     this.backTime,
+    this.outLoc,
+    this.backLoc,
   });
 }
 
@@ -247,7 +271,8 @@ class TimelineEvent {
   final String label;
   final IconData icon;
   final Color color;
-  TimelineEvent(this.time, this.label, this.icon, this.color);
+  final LocationPoint? loc;
+  TimelineEvent(this.time, this.label, this.icon, this.color, this.loc);
 }
 
 // ===================================================
@@ -260,6 +285,34 @@ class AppStore extends ChangeNotifier {
   final List<Dispatch> dispatches = [];
   final List<String> commonPlaces = ['金星會館', '皇家飯店', '水晶酒店', '銀河KTV'];
   int _nextId = 1;
+
+  // ---------- 店家位置設定（管理員設定） ----------
+  double? storeLat;
+  double? storeLng;
+  double radius = 100; // 允許範圍（公尺）
+  bool requireInRange = true; // 上班打卡是否必須在範圍內
+
+  bool get hasStoreLocation => storeLat != null && storeLng != null;
+
+  // 離店家幾公尺（沒設定店家位置就回傳 null）
+  double? distanceToStore(LocationPoint p) {
+    if (!hasStoreLocation) return null;
+    return Geolocator.distanceBetween(storeLat!, storeLng!, p.lat, p.lng);
+  }
+
+  void setStoreSettings(
+      double? lat, double? lng, double newRadius, bool require) {
+    storeLat = lat;
+    storeLng = lng;
+    radius = newRadius;
+    requireInRange = require;
+    notifyListeners();
+  }
+
+  void giveLocationConsent(Hostess h) {
+    h.locationConsent = true;
+    notifyListeners();
+  }
 
   AppStore() {
     _seed();
@@ -312,19 +365,20 @@ class AppStore extends ChangeNotifier {
     final events = <TimelineEvent>[];
     for (final a in attendances) {
       if (a.hostessId == hostessId && businessDay(a.clockIn) == day) {
-        events.add(TimelineEvent(a.clockIn, '上班打卡', Icons.login, Colors.green));
+        events.add(TimelineEvent(
+            a.clockIn, '上班打卡', Icons.login, Colors.green, a.inLoc));
         if (a.clockOut != null) {
-          events.add(
-              TimelineEvent(a.clockOut!, '下班打卡', Icons.logout, Colors.red));
+          events.add(TimelineEvent(
+              a.clockOut!, '下班打卡', Icons.logout, Colors.red, a.outLoc));
         }
       }
     }
     for (final d in dispatchesOnDay(hostessId, day)) {
-      events.add(TimelineEvent(
-          d.outTime, '外出：${d.place}', Icons.directions_car, Colors.orange));
+      events.add(TimelineEvent(d.outTime, '外出：${d.place}',
+          Icons.directions_car, Colors.orange, d.outLoc));
       if (d.backTime != null) {
-        events.add(
-            TimelineEvent(d.backTime!, '回店', Icons.storefront, Colors.blue));
+        events.add(TimelineEvent(
+            d.backTime!, '回店', Icons.storefront, Colors.blue, d.backLoc));
       }
     }
     events.sort((a, b) => a.time.compareTo(b.time));
@@ -339,33 +393,42 @@ class AppStore extends ChangeNotifier {
   }
 
   // ---------- 打卡動作 ----------
-  void clockIn(String hostessId) {
+  void clockIn(String hostessId, {LocationPoint? loc}) {
     if (todayAttendance(hostessId) != null) return;
-    attendances.add(Attendance(hostessId: hostessId, clockIn: DateTime.now()));
+    attendances.add(Attendance(
+        hostessId: hostessId, clockIn: DateTime.now(), inLoc: loc));
     notifyListeners();
   }
 
-  void goOut(String hostessId, String place) {
+  void goOut(String hostessId, String place, {LocationPoint? loc}) {
     if (currentDispatch(hostessId) != null) return;
-    dispatches.add(
-        Dispatch(hostessId: hostessId, place: place, outTime: DateTime.now()));
+    dispatches.add(Dispatch(
+        hostessId: hostessId,
+        place: place,
+        outTime: DateTime.now(),
+        outLoc: loc));
     if (!commonPlaces.contains(place)) commonPlaces.add(place);
     notifyListeners();
   }
 
-  void comeBack(String hostessId) {
+  void comeBack(String hostessId, {LocationPoint? loc}) {
     final d = currentDispatch(hostessId);
     if (d == null) return;
     d.backTime = DateTime.now();
+    d.backLoc = loc;
     notifyListeners();
   }
 
-  void clockOut(String hostessId) {
+  void clockOut(String hostessId, {LocationPoint? loc}) {
     final d = currentDispatch(hostessId);
-    if (d != null) d.backTime = DateTime.now(); // 外出中直接下班，順便算回店
+    if (d != null) {
+      d.backTime = DateTime.now(); // 外出中直接下班，順便算回店
+      d.backLoc = loc;
+    }
     final att = todayAttendance(hostessId);
     if (att == null || att.clockOut != null) return;
     att.clockOut = DateTime.now();
+    att.outLoc = loc;
     notifyListeners();
   }
 
@@ -489,6 +552,120 @@ class AppStore extends ChangeNotifier {
 }
 
 final store = AppStore();
+
+// ===================================================
+// 定位
+// ===================================================
+
+// 取得目前位置（會顯示「定位中」），失敗回傳 null
+Future<LocationPoint?> getCurrentLocation(BuildContext context) async {
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const AlertDialog(
+      content: Row(
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(width: 20),
+          Expanded(child: Text('定位中，請稍候…')),
+        ],
+      ),
+    ),
+  );
+
+  LocationPoint? result;
+  String? error;
+  try {
+    // 網頁版：直接取位置，瀏覽器會自己跳出詢問
+    if (!kIsWeb) {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        error = '沒有定位權限，請到手機設定允許使用位置';
+      }
+    }
+    if (error == null) {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.best,
+          timeLimit: Duration(seconds: 20),
+        ),
+      );
+      result = LocationPoint(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        accuracy: pos.accuracy,
+      );
+    }
+  } catch (e) {
+    error = '定位失敗：請確認手機定位已開啟，並允許 Safari 使用位置';
+  }
+
+  if (context.mounted) {
+    Navigator.of(context, rootNavigator: true).pop(); // 關掉「定位中」
+    if (error != null) toast(context, error);
+  }
+  return result;
+}
+
+// 在 Google 地圖打開位置
+Future<void> openMap(double lat, double lng) async {
+  final uri =
+      Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+  await launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+
+// 位置的文字說明，例如「距離店家 35 公尺」
+String locationText(LocationPoint? loc) {
+  if (loc == null) return '沒有定位';
+  final d = store.distanceToStore(loc);
+  var text = d == null ? '已記錄位置' : '距離店家 ${d.round()} 公尺';
+  if (loc.accuracy > 100) text += '（訊號弱，誤差約 ${loc.accuracy.round()} 公尺）';
+  return text;
+}
+
+bool isOutOfRange(LocationPoint? loc) {
+  if (loc == null) return false;
+  final d = store.distanceToStore(loc);
+  return d != null && d > store.radius;
+}
+
+// 第一次打卡前，請小姐同意記錄位置
+Future<bool> ensureLocationConsent(BuildContext context, Hostess h) async {
+  if (h.locationConsent) return true;
+  final ok = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (c) => AlertDialog(
+      title: const Text('打卡定位說明'),
+      content: const Text(
+        '按打卡按鈕（上班、外出、回店、下班）時，會記錄你當下的位置。\n\n'
+        '・只在按下打卡的那一刻記錄，不會持續追蹤\n'
+        '・用途：確認出勤\n'
+        '・管理員可以查看你的打卡位置\n\n'
+        '按「同意」後，手機會詢問是否允許使用位置，請按「允許」。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(c, false),
+          child: const Text('不同意'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(c, true),
+          child: const Text('同意'),
+        ),
+      ],
+    ),
+  );
+  if (ok == true) {
+    store.giveLocationConsent(h);
+    return true;
+  }
+  return false;
+}
 
 // ===================================================
 // 狀態小標籤
@@ -797,50 +974,104 @@ class ClockPanel extends StatelessWidget {
   final Hostess hostess;
   const ClockPanel({super.key, required this.hostess});
 
-  Future<void> askPlace(BuildContext context) async {
+  // 取得打卡位置（第一次會先問是否同意）
+  Future<LocationPoint?> locate(BuildContext context) async {
+    final agreed = await ensureLocationConsent(context, hostess);
+    if (!agreed || !context.mounted) return null;
+    return getCurrentLocation(context);
+  }
+
+  String savedText(LocationPoint? loc) => loc == null ? '' : '（已記錄位置）';
+
+  Future<void> doClockIn(BuildContext context) async {
+    final loc = await locate(context);
+    if (!context.mounted) return;
+
+    // 有設定店家位置，而且要求必須在範圍內
+    if (store.hasStoreLocation && store.requireInRange) {
+      if (loc == null) {
+        toast(context, '需要定位才能上班打卡');
+        return;
+      }
+      final d = store.distanceToStore(loc)!;
+      if (d > store.radius) {
+        await showDialog(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: const Text('不在店家範圍內'),
+            content: Text(
+                '你目前距離店家約 ${d.round()} 公尺，要在 ${store.radius.round()} 公尺內才能上班打卡。'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('知道了'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+    }
+
+    store.clockIn(hostess.id, loc: loc);
+    toast(context, '上班打卡成功 ${fmtTime(DateTime.now())}${savedText(loc)}');
+  }
+
+  Future<void> doGoOut(BuildContext context) async {
     final place = await showDialog<String>(
       context: context,
       builder: (_) => const PlaceDialog(),
     );
-    if (place == null || place.trim().isEmpty) return;
-    store.goOut(hostess.id, place.trim());
-    if (context.mounted) toast(context, '外出：${place.trim()}');
+    if (place == null || place.trim().isEmpty || !context.mounted) return;
+    final loc = await locate(context);
+    if (!context.mounted) return;
+    store.goOut(hostess.id, place.trim(), loc: loc);
+    toast(context, '外出：${place.trim()}${savedText(loc)}');
+  }
+
+  Future<void> doComeBack(BuildContext context) async {
+    final loc = await locate(context);
+    if (!context.mounted) return;
+    store.comeBack(hostess.id, loc: loc);
+    toast(context, '已回店${savedText(loc)}');
+  }
+
+  Future<void> doClockOut(BuildContext context, String message) async {
+    final ok = await confirmDialog(context, '下班打卡', message);
+    if (!ok || !context.mounted) return;
+    final loc = await locate(context);
+    if (!context.mounted) return;
+    store.clockOut(hostess.id, loc: loc);
+    toast(context, '下班打卡成功，辛苦了！${savedText(loc)}');
   }
 
   List<Widget> actionButtons(BuildContext context, WorkStatus status) {
     switch (status) {
       case WorkStatus.notIn:
         return [
-          bigButton('上班打卡', Icons.login, Colors.green, () {
-            store.clockIn(hostess.id);
-            toast(context, '上班打卡成功 ${fmtTime(DateTime.now())}');
-          }),
+          bigButton('上班打卡', Icons.login, Colors.green,
+              () => doClockIn(context)),
+          if (store.hasStoreLocation && store.requireInRange) ...[
+            const SizedBox(height: 8),
+            Text('需在店家 ${store.radius.round()} 公尺內打卡',
+                style: const TextStyle(color: Colors.grey)),
+          ],
         ];
       case WorkStatus.inStore:
         return [
           bigButton('外出', Icons.directions_car, Colors.orange,
-              () => askPlace(context)),
+              () => doGoOut(context)),
           const SizedBox(height: 12),
-          bigButton('下班打卡', Icons.logout, Colors.red, () async {
-            final ok = await confirmDialog(context, '下班打卡', '確定要下班了嗎？');
-            if (!ok) return;
-            store.clockOut(hostess.id);
-            if (context.mounted) toast(context, '下班打卡成功，辛苦了！');
-          }),
+          bigButton('下班打卡', Icons.logout, Colors.red,
+              () => doClockOut(context, '確定要下班了嗎？')),
         ];
       case WorkStatus.out:
         return [
-          bigButton('回店', Icons.storefront, Colors.blue, () {
-            store.comeBack(hostess.id);
-            toast(context, '已回店');
-          }),
+          bigButton('回店', Icons.storefront, Colors.blue,
+              () => doComeBack(context)),
           const SizedBox(height: 12),
-          bigButton('直接下班', Icons.logout, Colors.red, () async {
-            final ok = await confirmDialog(context, '下班打卡', '外出中直接下班？');
-            if (!ok) return;
-            store.clockOut(hostess.id);
-            if (context.mounted) toast(context, '下班打卡成功，辛苦了！');
-          }),
+          bigButton('直接下班', Icons.logout, Colors.red,
+              () => doClockOut(context, '外出中直接下班？')),
         ];
       case WorkStatus.off:
         return [
@@ -983,12 +1214,22 @@ class TodayTimeline extends StatelessWidget {
       color: Colors.white,
       child: Column(
         children: events.map((e) {
+          final loc = e.loc;
           return ListTile(
             dense: true,
             leading: Icon(e.icon, color: e.color),
             title: Text(e.label, style: const TextStyle(fontSize: 15)),
+            subtitle: Text(
+              loc == null ? '沒有定位' : '📍 ${locationText(loc)}（點我看地圖）',
+              style: TextStyle(
+                color: isOutOfRange(loc) && e.label == '上班打卡'
+                    ? Colors.red
+                    : Colors.grey,
+              ),
+            ),
             trailing: Text(fmtTime(e.time),
                 style: const TextStyle(fontSize: 15)),
+            onTap: loc == null ? null : () => openMap(loc.lat, loc.lng),
           );
         }).toList(),
       ),
@@ -1092,7 +1333,19 @@ class _AdminHomeState extends State<AdminHome> {
         }
         return Scaffold(
           backgroundColor: pageBg,
-          appBar: blackBar('$appName 管理', actions: [logoutButton(context)]),
+          appBar: blackBar('$appName 管理', actions: [
+            IconButton(
+              icon: Icon(store.hasStoreLocation
+                  ? Icons.location_on
+                  : Icons.location_off),
+              tooltip: '店家位置設定',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const StoreSettingsPage()),
+              ),
+            ),
+            logoutButton(context),
+          ]),
           body: body,
           floatingActionButton: tab == 2
               ? FloatingActionButton(
@@ -1185,14 +1438,16 @@ class AdminTodayView extends StatelessWidget {
               detail = '尚未打卡';
               break;
             case WorkStatus.inStore:
-              detail = '上班 ${fmtTime(att!.clockIn)}・外出 $n 次';
+              detail = '上班 ${fmtTime(att!.clockIn)}・外出 $n 次'
+                  '${isOutOfRange(att.inLoc) ? '\n⚠ 上班打卡不在店家範圍' : ''}';
               break;
             case WorkStatus.out:
               detail = '外出中：${cur!.place}（${fmtTime(cur.outTime)} 出發）';
               break;
             case WorkStatus.off:
               detail =
-                  '${fmtTime(att!.clockIn)} ～ ${fmtTime(att.clockOut!)}・外出 $n 次';
+                  '${fmtTime(att!.clockIn)} ～ ${fmtTime(att.clockOut!)}・外出 $n 次'
+                  '${isOutOfRange(att.inLoc) ? '\n⚠ 上班打卡不在店家範圍' : ''}';
               break;
           }
           return Card(
@@ -1767,6 +2022,218 @@ class _RegisterPageState extends State<RegisterPage> {
             '送出後需要管理員核准，核准後才能登入打卡。',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ===================================================
+// 店家位置設定（管理員）
+// ===================================================
+class StoreSettingsPage extends StatefulWidget {
+  const StoreSettingsPage({super.key});
+
+  @override
+  State<StoreSettingsPage> createState() => _StoreSettingsPageState();
+}
+
+class _StoreSettingsPageState extends State<StoreSettingsPage> {
+  late final latController =
+      TextEditingController(text: store.storeLat?.toString() ?? '');
+  late final lngController =
+      TextEditingController(text: store.storeLng?.toString() ?? '');
+  late final radiusController =
+      TextEditingController(text: store.radius.round().toString());
+  late bool requireInRange = store.requireInRange;
+  String? accuracyNote;
+
+  @override
+  void dispose() {
+    latController.dispose();
+    lngController.dispose();
+    radiusController.dispose();
+    super.dispose();
+  }
+
+  Future<void> useCurrentLocation() async {
+    final loc = await getCurrentLocation(context);
+    if (loc == null || !mounted) return;
+    setState(() {
+      latController.text = loc.lat.toStringAsFixed(6);
+      lngController.text = loc.lng.toStringAsFixed(6);
+      accuracyNote = '本次定位誤差約 ${loc.accuracy.round()} 公尺'
+          '${loc.accuracy > 50 ? '，建議到窗邊或門口再定位一次' : ''}';
+    });
+  }
+
+  void save() {
+    final latText = latController.text.trim();
+    final lngText = lngController.text.trim();
+    final radius = double.tryParse(radiusController.text.trim());
+
+    if (radius == null || radius < 10 || radius > 5000) {
+      toast(context, '範圍請輸入 10 ～ 5000 公尺');
+      return;
+    }
+
+    double? lat;
+    double? lng;
+    if (latText.isNotEmpty || lngText.isNotEmpty) {
+      lat = double.tryParse(latText);
+      lng = double.tryParse(lngText);
+      if (lat == null || lng == null || lat.abs() > 90 || lng.abs() > 180) {
+        toast(context, '座標格式錯誤');
+        return;
+      }
+    }
+
+    store.setStoreSettings(lat, lng, radius, requireInRange);
+    toast(context, lat == null ? '已儲存（未設定店家位置）' : '店家位置已儲存');
+    Navigator.pop(context);
+  }
+
+  void clearLocation() {
+    setState(() {
+      latController.clear();
+      lngController.clear();
+      accuracyNote = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lat = double.tryParse(latController.text.trim());
+    final lng = double.tryParse(lngController.text.trim());
+
+    return Scaffold(
+      backgroundColor: pageBg,
+      appBar: blackBar('店家位置設定'),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            color: Colors.white,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('方法一：站在店裡，用手機定位',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  bigButton('用我現在的位置', Icons.my_location, gold,
+                      useCurrentLocation),
+                  if (accuracyNote != null) ...[
+                    const SizedBox(height: 8),
+                    Text(accuracyNote!,
+                        style: const TextStyle(color: Colors.grey)),
+                  ],
+                  const SizedBox(height: 20),
+                  const Text('方法二：手動輸入座標',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  const Text('在 Google 地圖長按店家位置，上方會出現座標，複製貼上即可。',
+                      style: TextStyle(color: Colors.grey)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: latController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true, signed: true),
+                          decoration: const InputDecoration(
+                            labelText: '緯度（例如 25.033）',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: lngController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true, signed: true),
+                          decoration: const InputDecoration(
+                            labelText: '經度（例如 121.565）',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      if (lat != null && lng != null)
+                        TextButton.icon(
+                          onPressed: () => openMap(lat, lng),
+                          icon: const Icon(Icons.map),
+                          label: const Text('在地圖確認'),
+                        ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: clearLocation,
+                        child: const Text('清除位置',
+                            style: TextStyle(color: Colors.red)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            color: Colors.white,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('打卡規則',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: radiusController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: '允許範圍（公尺）',
+                      helperText: '建議 100～200，室內 GPS 常有幾十公尺誤差',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('上班打卡必須在範圍內'),
+                    subtitle: const Text('關閉的話，只記錄位置、不擋打卡'),
+                    value: requireInRange,
+                    onChanged: (v) => setState(() => requireInRange = v),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton(
+              onPressed: save,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black,
+                foregroundColor: gold,
+              ),
+              child: const Text('儲存設定',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
           ),
         ],
       ),
