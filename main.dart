@@ -1,57 +1,1461 @@
-# 每次 main.dart 更新，GitHub 會自動把 App 打包成網頁版並發佈
-name: Build and deploy web app
+import 'package:flutter/material.dart';
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch: # 也可以在 Actions 頁面手動按執行
+// ===================================================
+// 金爵國際 出勤管理
+// 小姐：上班打卡、外出、回店、下班打卡、看自己的紀錄
+// 管理員：看今日人數、統計、管理名單
+// 目前資料存在手機記憶體裡（重新整理會回到測試資料），
+// 下一步接 Firebase 後，大家的手機就會同步。
+// ===================================================
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+void main() {
+  runApp(const MyApp());
+}
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
+const String appName = '金爵國際';
+const Color gold = Color(0xFFC9A227);
+const Color pageBg = Color(0xFFF5F5F5);
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 取得程式碼
-        uses: actions/checkout@v4
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
-      - name: 安裝 Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: appName,
+      theme: ThemeData(colorSchemeSeed: gold),
+      home: const LoginPage(),
+    );
+  }
+}
 
-      - name: 建立專案並放入 main.dart
-        run: |
-          flutter create --platforms web --project-name dispatch_app app
-          cp main.dart app/lib/main.dart
-          # 把 App 名稱改成 24h派車（加入主畫面時顯示的名字）
-          sed -i 's/"name": "dispatch_app"/"name": "24h派車"/; s/"short_name": "dispatch_app"/"short_name": "24h派車"/' app/web/manifest.json
-          sed -i 's/content="dispatch_app"/content="24h派車"/; s#<title>dispatch_app</title>#<title>24h派車</title>#' app/web/index.html
+// ===================================================
+// 小工具
+// ===================================================
+String two(int n) => n.toString().padLeft(2, '0');
+String fmtTime(DateTime t) => '${two(t.hour)}:${two(t.minute)}';
+const List<String> weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+String fmtDate(DateTime d) => '${d.month}/${d.day}（${weekdays[d.weekday - 1]}）';
+DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
-      - name: 打包網頁版
-        working-directory: app
-        run: flutter build web --release --base-href "/${{ github.event.repository.name }}/"
+// 營業日：早上 8 點才換日，所以晚上上班、凌晨下班都算同一天
+DateTime businessDay(DateTime t) =>
+    dateOnly(t.subtract(const Duration(hours: 8)));
 
-      - name: 上傳打包結果
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: app/build/web
+bool inRange(DateTime day, DateTime start, DateTime end) =>
+    !day.isBefore(start) && day.isBefore(end);
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: 發佈到 GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+AppBar blackBar(String title, {List<Widget>? actions}) {
+  return AppBar(
+    backgroundColor: Colors.black,
+    foregroundColor: Colors.white,
+    centerTitle: true,
+    title: Text(title),
+    actions: actions,
+  );
+}
+
+void toast(BuildContext context, String text) {
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 2)),
+    );
+}
+
+Future<bool> confirmDialog(
+    BuildContext context, String title, String message) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text(title),
+      content: Text(message),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(c, false),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(c, true),
+          child: const Text('確定'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+Widget logoutButton(BuildContext context) {
+  return IconButton(
+    icon: const Icon(Icons.logout),
+    tooltip: '登出',
+    onPressed: () async {
+      final ok = await confirmDialog(context, '登出', '確定要登出嗎？');
+      if (ok && context.mounted) {
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(builder: (_) => const LoginPage()),
+          (route) => false,
+        );
+      }
+    },
+  );
+}
+
+Widget bigButton(
+    String label, IconData icon, Color color, VoidCallback onPressed) {
+  return SizedBox(
+    width: double.infinity,
+    height: 56,
+    child: ElevatedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon),
+      label: Text(label, style: const TextStyle(fontSize: 18)),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: color,
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+  );
+}
+
+// 白底數字小方塊（例如「今日上班 5 人」）
+Widget statBox(String label, String value, {Color color = Colors.black}) {
+  return Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        children: [
+          Text(label, style: const TextStyle(color: Colors.grey)),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget sectionTitle(String text) {
+  return Padding(
+    padding: const EdgeInsets.only(top: 20, bottom: 8),
+    child: Text(
+      text,
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+    ),
+  );
+}
+
+// ===================================================
+// 資料
+// ===================================================
+class Hostess {
+  final String id;
+  String name;
+  String phone;
+  Hostess({required this.id, required this.name, required this.phone});
+}
+
+// 一次上班（打卡上班 ～ 打卡下班）
+class Attendance {
+  final String hostessId;
+  final DateTime clockIn;
+  DateTime? clockOut;
+  Attendance({required this.hostessId, required this.clockIn, this.clockOut});
+}
+
+// 一次外出（出發 ～ 回店）
+class Dispatch {
+  final String hostessId;
+  final String place;
+  final DateTime outTime;
+  DateTime? backTime;
+  Dispatch({
+    required this.hostessId,
+    required this.place,
+    required this.outTime,
+    this.backTime,
+  });
+}
+
+enum WorkStatus { notIn, inStore, out, off }
+
+extension WorkStatusText on WorkStatus {
+  String get label {
+    switch (this) {
+      case WorkStatus.notIn:
+        return '未到';
+      case WorkStatus.inStore:
+        return '在店';
+      case WorkStatus.out:
+        return '外出中';
+      case WorkStatus.off:
+        return '已下班';
+    }
+  }
+
+  Color get color {
+    switch (this) {
+      case WorkStatus.notIn:
+        return Colors.grey;
+      case WorkStatus.inStore:
+        return Colors.green;
+      case WorkStatus.out:
+        return Colors.orange;
+      case WorkStatus.off:
+        return Colors.blueGrey;
+    }
+  }
+
+  // 管理員列表排序：外出中 → 在店 → 已下班 → 未到
+  int get sortRank {
+    switch (this) {
+      case WorkStatus.out:
+        return 0;
+      case WorkStatus.inStore:
+        return 1;
+      case WorkStatus.off:
+        return 2;
+      case WorkStatus.notIn:
+        return 3;
+    }
+  }
+}
+
+class TimelineEvent {
+  final DateTime time;
+  final String label;
+  final IconData icon;
+  final Color color;
+  TimelineEvent(this.time, this.label, this.icon, this.color);
+}
+
+// ===================================================
+// 資料中心：所有資料和動作都在這裡
+// 之後接 Firebase，主要就是改這一塊
+// ===================================================
+class AppStore extends ChangeNotifier {
+  final List<Hostess> hostesses = [];
+  final List<Attendance> attendances = [];
+  final List<Dispatch> dispatches = [];
+  final List<String> commonPlaces = ['金星會館', '皇家飯店', '水晶酒店', '銀河KTV'];
+  int _nextId = 1;
+
+  AppStore() {
+    _seed();
+  }
+
+  String _newId() => 'h${_nextId++}';
+
+  Hostess? findByPhone(String phone) {
+    for (final h in hostesses) {
+      if (h.phone == phone) return h;
+    }
+    return null;
+  }
+
+  // 今天（營業日）的上班紀錄
+  Attendance? todayAttendance(String hostessId) {
+    final today = businessDay(DateTime.now());
+    Attendance? result;
+    for (final a in attendances) {
+      if (a.hostessId == hostessId && businessDay(a.clockIn) == today) {
+        result = a;
+      }
+    }
+    return result;
+  }
+
+  // 目前還沒回店的外出
+  Dispatch? currentDispatch(String hostessId) {
+    for (final d in dispatches) {
+      if (d.hostessId == hostessId && d.backTime == null) return d;
+    }
+    return null;
+  }
+
+  WorkStatus statusOf(String hostessId) {
+    final att = todayAttendance(hostessId);
+    if (att == null) return WorkStatus.notIn;
+    if (att.clockOut != null) return WorkStatus.off;
+    if (currentDispatch(hostessId) != null) return WorkStatus.out;
+    return WorkStatus.inStore;
+  }
+
+  List<Dispatch> dispatchesOnDay(String hostessId, DateTime day) {
+    return dispatches
+        .where((d) => d.hostessId == hostessId && businessDay(d.outTime) == day)
+        .toList();
+  }
+
+  List<TimelineEvent> eventsOnDay(String hostessId, DateTime day) {
+    final events = <TimelineEvent>[];
+    for (final a in attendances) {
+      if (a.hostessId == hostessId && businessDay(a.clockIn) == day) {
+        events.add(TimelineEvent(a.clockIn, '上班打卡', Icons.login, Colors.green));
+        if (a.clockOut != null) {
+          events.add(
+              TimelineEvent(a.clockOut!, '下班打卡', Icons.logout, Colors.red));
+        }
+      }
+    }
+    for (final d in dispatchesOnDay(hostessId, day)) {
+      events.add(TimelineEvent(
+          d.outTime, '外出：${d.place}', Icons.directions_car, Colors.orange));
+      if (d.backTime != null) {
+        events.add(
+            TimelineEvent(d.backTime!, '回店', Icons.storefront, Colors.blue));
+      }
+    }
+    events.sort((a, b) => a.time.compareTo(b.time));
+    return events;
+  }
+
+  String nameOf(String hostessId) {
+    for (final h in hostesses) {
+      if (h.id == hostessId) return h.name;
+    }
+    return '（已刪除）';
+  }
+
+  // ---------- 打卡動作 ----------
+  void clockIn(String hostessId) {
+    if (todayAttendance(hostessId) != null) return;
+    attendances.add(Attendance(hostessId: hostessId, clockIn: DateTime.now()));
+    notifyListeners();
+  }
+
+  void goOut(String hostessId, String place) {
+    if (currentDispatch(hostessId) != null) return;
+    dispatches.add(
+        Dispatch(hostessId: hostessId, place: place, outTime: DateTime.now()));
+    if (!commonPlaces.contains(place)) commonPlaces.add(place);
+    notifyListeners();
+  }
+
+  void comeBack(String hostessId) {
+    final d = currentDispatch(hostessId);
+    if (d == null) return;
+    d.backTime = DateTime.now();
+    notifyListeners();
+  }
+
+  void clockOut(String hostessId) {
+    final d = currentDispatch(hostessId);
+    if (d != null) d.backTime = DateTime.now(); // 外出中直接下班，順便算回店
+    final att = todayAttendance(hostessId);
+    if (att == null || att.clockOut != null) return;
+    att.clockOut = DateTime.now();
+    notifyListeners();
+  }
+
+  // ---------- 名單管理 ----------
+  void addHostess(String name, String phone) {
+    hostesses.add(Hostess(id: _newId(), name: name, phone: phone));
+    notifyListeners();
+  }
+
+  void updateHostess(Hostess h, String name, String phone) {
+    h.name = name;
+    h.phone = phone;
+    notifyListeners();
+  }
+
+  void removeHostess(Hostess h) {
+    hostesses.remove(h);
+    notifyListeners();
+  }
+
+  // ---------- 測試資料 ----------
+  void _seed() {
+    const names = ['小美', '小雪', '小琪', '小婷', '小安', '小玲'];
+    for (var i = 0; i < names.length; i++) {
+      hostesses.add(
+          Hostess(id: _newId(), name: names[i], phone: '09110000${two(i + 1)}'));
+    }
+
+    final today = businessDay(DateTime.now());
+
+    // 過去 40 天的紀錄
+    for (var d = 1; d <= 40; d++) {
+      final day = DateTime(today.year, today.month, today.day - d);
+      for (var i = 0; i < hostesses.length; i++) {
+        if ((d + i) % 3 == 0) continue; // 有幾天休假
+        final h = hostesses[i];
+        final inTime = day.add(Duration(hours: 20, minutes: i * 7));
+        final outTime = day.add(Duration(hours: 27, minutes: i * 5));
+        attendances.add(
+            Attendance(hostessId: h.id, clockIn: inTime, clockOut: outTime));
+        final times = (d + i) % 4;
+        for (var k = 0; k < times; k++) {
+          final o = inTime.add(Duration(hours: 1 + k * 2));
+          dispatches.add(Dispatch(
+            hostessId: h.id,
+            place: commonPlaces[(d + i + k) % commonPlaces.length],
+            outTime: o,
+            backTime: o.add(const Duration(minutes: 70)),
+          ));
+        }
+      }
+    }
+
+    // 今天：放幾筆讓畫面有東西看
+    final now = DateTime.now();
+    final dayStart = today.add(const Duration(hours: 8));
+    if (now.subtract(const Duration(hours: 3)).isAfter(dayStart)) {
+      final h0 = hostesses[0].id;
+      final h1 = hostesses[1].id;
+      final h2 = hostesses[2].id;
+      attendances.add(Attendance(
+          hostessId: h0, clockIn: now.subtract(const Duration(hours: 2))));
+      dispatches.add(Dispatch(
+        hostessId: h0,
+        place: commonPlaces[0],
+        outTime: now.subtract(const Duration(minutes: 90)),
+        backTime: now.subtract(const Duration(minutes: 30)),
+      ));
+      attendances.add(Attendance(
+          hostessId: h1, clockIn: now.subtract(const Duration(hours: 3))));
+      dispatches.add(Dispatch(
+        hostessId: h1,
+        place: commonPlaces[1],
+        outTime: now.subtract(const Duration(minutes: 40)),
+      ));
+      attendances.add(Attendance(
+          hostessId: h2, clockIn: now.subtract(const Duration(hours: 1))));
+    }
+  }
+}
+
+final store = AppStore();
+
+// ===================================================
+// 狀態小標籤
+// ===================================================
+class StatusChip extends StatelessWidget {
+  final WorkStatus status;
+  final bool large;
+  const StatusChip({super.key, required this.status, this.large = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: large
+          ? const EdgeInsets.symmetric(horizontal: 18, vertical: 6)
+          : const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: status.color,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        status.label,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: large ? 18 : 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
+// ===================================================
+// 登入頁
+// ===================================================
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  bool isAdmin = false;
+  bool hidePassword = true;
+  final accountController = TextEditingController();
+  final passwordController = TextEditingController();
+
+  @override
+  void dispose() {
+    accountController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  void login() {
+    final account = accountController.text.trim();
+    final password = passwordController.text;
+
+    if (account.isEmpty || password.isEmpty) {
+      toast(context, '請輸入帳號和密碼');
+      return;
+    }
+    if (password.length < 6) {
+      toast(context, '密碼至少 6 碼');
+      return;
+    }
+
+    if (isAdmin) {
+      if (account != 'admin') {
+        toast(context, '管理員帳號錯誤（測試帳號：admin）');
+        return;
+      }
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const AdminHome()),
+      );
+    } else {
+      final h = store.findByPhone(account);
+      if (h == null) {
+        toast(context, '查無此手機號碼，請聯絡管理員新增');
+        return;
+      }
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => HostessHome(hostess: h)),
+      );
+    }
+  }
+
+  Widget roleButton(String label, bool admin) {
+    final selected = isAdmin == admin;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() {
+          isAdmin = admin;
+          accountController.clear();
+        }),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected ? gold : Colors.transparent,
+            border: Border.all(color: gold),
+            borderRadius: BorderRadius.circular(30),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.black : gold,
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget inputBox({
+    required TextEditingController controller,
+    required String hint,
+    required IconData icon,
+    bool obscure = false,
+    TextInputType keyboardType = TextInputType.text,
+    Widget? suffix,
+  }) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      keyboardType: keyboardType,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: Icon(icon),
+        suffixIcon: suffix,
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(vertical: 14),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(30),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 36),
+            child: Column(
+              children: [
+                const Icon(Icons.diamond_outlined, size: 80, color: gold),
+                const SizedBox(height: 8),
+                const Text(
+                  appName,
+                  style: TextStyle(
+                    color: gold,
+                    fontSize: 36,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  '出勤管理系統',
+                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+                const SizedBox(height: 36),
+                Row(
+                  children: [
+                    roleButton('小姐登入', false),
+                    const SizedBox(width: 12),
+                    roleButton('管理員', true),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                inputBox(
+                  controller: accountController,
+                  hint: isAdmin ? '管理員帳號' : '手機號碼',
+                  icon: isAdmin ? Icons.person : Icons.phone_iphone,
+                  keyboardType:
+                      isAdmin ? TextInputType.text : TextInputType.phone,
+                ),
+                const SizedBox(height: 12),
+                inputBox(
+                  controller: passwordController,
+                  hint: '密碼',
+                  icon: Icons.lock,
+                  obscure: hidePassword,
+                  suffix: IconButton(
+                    icon: Icon(
+                      hidePassword ? Icons.visibility_off : Icons.visibility,
+                    ),
+                    onPressed: () =>
+                        setState(() => hidePassword = !hidePassword),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: ElevatedButton(
+                    onPressed: login,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: gold,
+                      foregroundColor: Colors.black,
+                      shape: const StadiumBorder(),
+                    ),
+                    child: const Text(
+                      '登入',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 28),
+                const Text(
+                  '測試帳號\n小姐：0911000001 ～ 0911000006\n管理員：admin\n密碼：任意 6 碼以上',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white38, height: 1.6),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ===================================================
+// 小姐端
+// ===================================================
+class HostessHome extends StatefulWidget {
+  final Hostess hostess;
+  const HostessHome({super.key, required this.hostess});
+
+  @override
+  State<HostessHome> createState() => _HostessHomeState();
+}
+
+class _HostessHomeState extends State<HostessHome> {
+  int tab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: pageBg,
+      appBar: blackBar(appName, actions: [logoutButton(context)]),
+      // store 資料一變，這裡就自動重畫
+      body: ListenableBuilder(
+        listenable: store,
+        builder: (context, _) => tab == 0
+            ? ClockPanel(hostess: widget.hostess)
+            : RecordsView(hostess: widget.hostess),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: tab,
+        selectedItemColor: Colors.black,
+        onTap: (i) => setState(() => tab = i),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.touch_app), label: '打卡'),
+          BottomNavigationBarItem(icon: Icon(Icons.history), label: '我的紀錄'),
+        ],
+      ),
+    );
+  }
+}
+
+// 打卡畫面
+class ClockPanel extends StatelessWidget {
+  final Hostess hostess;
+  const ClockPanel({super.key, required this.hostess});
+
+  Future<void> askPlace(BuildContext context) async {
+    final place = await showDialog<String>(
+      context: context,
+      builder: (_) => const PlaceDialog(),
+    );
+    if (place == null || place.trim().isEmpty) return;
+    store.goOut(hostess.id, place.trim());
+    if (context.mounted) toast(context, '外出：${place.trim()}');
+  }
+
+  List<Widget> actionButtons(BuildContext context, WorkStatus status) {
+    switch (status) {
+      case WorkStatus.notIn:
+        return [
+          bigButton('上班打卡', Icons.login, Colors.green, () {
+            store.clockIn(hostess.id);
+            toast(context, '上班打卡成功 ${fmtTime(DateTime.now())}');
+          }),
+        ];
+      case WorkStatus.inStore:
+        return [
+          bigButton('外出', Icons.directions_car, Colors.orange,
+              () => askPlace(context)),
+          const SizedBox(height: 12),
+          bigButton('下班打卡', Icons.logout, Colors.red, () async {
+            final ok = await confirmDialog(context, '下班打卡', '確定要下班了嗎？');
+            if (!ok) return;
+            store.clockOut(hostess.id);
+            if (context.mounted) toast(context, '下班打卡成功，辛苦了！');
+          }),
+        ];
+      case WorkStatus.out:
+        return [
+          bigButton('回店', Icons.storefront, Colors.blue, () {
+            store.comeBack(hostess.id);
+            toast(context, '已回店');
+          }),
+          const SizedBox(height: 12),
+          bigButton('直接下班', Icons.logout, Colors.red, () async {
+            final ok = await confirmDialog(context, '下班打卡', '外出中直接下班？');
+            if (!ok) return;
+            store.clockOut(hostess.id);
+            if (context.mounted) toast(context, '下班打卡成功，辛苦了！');
+          }),
+        ];
+      case WorkStatus.off:
+        return [
+          const Text('今天已下班，辛苦了！', style: TextStyle(fontSize: 16)),
+        ];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = store.statusOf(hostess.id);
+    final current = store.currentDispatch(hostess.id);
+    final now = DateTime.now();
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          color: Colors.white,
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Text(
+                  '${hostess.name}，你好',
+                  style: const TextStyle(
+                      fontSize: 22, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 4),
+                Text('今天 ${fmtDate(now)}',
+                    style: const TextStyle(color: Colors.grey)),
+                const SizedBox(height: 16),
+                StatusChip(status: status, large: true),
+                if (current != null) ...[
+                  const SizedBox(height: 8),
+                  Text('前往：${current.place}（${fmtTime(current.outTime)} 出發）'),
+                ],
+                const SizedBox(height: 20),
+                ...actionButtons(context, status),
+              ],
+            ),
+          ),
+        ),
+        sectionTitle('今日紀錄'),
+        TodayTimeline(hostessId: hostess.id),
+      ],
+    );
+  }
+}
+
+// 選外出地點的視窗
+class PlaceDialog extends StatefulWidget {
+  const PlaceDialog({super.key});
+
+  @override
+  State<PlaceDialog> createState() => _PlaceDialogState();
+}
+
+class _PlaceDialogState extends State<PlaceDialog> {
+  String? selected;
+  final otherController = TextEditingController();
+
+  @override
+  void dispose() {
+    otherController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('要去哪裡？'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: store.commonPlaces.map((p) {
+                return ChoiceChip(
+                  label: Text(p),
+                  selected: selected == p,
+                  onSelected: (_) => setState(() {
+                    selected = p;
+                    otherController.clear();
+                  }),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: otherController,
+              decoration: const InputDecoration(
+                labelText: '或輸入其他地點',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onChanged: (_) => setState(() => selected = null),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        TextButton(
+          onPressed: () {
+            final typed = otherController.text.trim();
+            Navigator.pop(context, typed.isNotEmpty ? typed : selected);
+          },
+          child: const Text('出發'),
+        ),
+      ],
+    );
+  }
+}
+
+// 今日時間軸
+class TodayTimeline extends StatelessWidget {
+  final String hostessId;
+  const TodayTimeline({super.key, required this.hostessId});
+
+  @override
+  Widget build(BuildContext context) {
+    final events = store.eventsOnDay(hostessId, businessDay(DateTime.now()));
+    if (events.isEmpty) {
+      return const Card(
+        color: Colors.white,
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('今天還沒有紀錄', style: TextStyle(color: Colors.grey)),
+        ),
+      );
+    }
+    return Card(
+      color: Colors.white,
+      child: Column(
+        children: events.map((e) {
+          return ListTile(
+            dense: true,
+            leading: Icon(e.icon, color: e.color),
+            title: Text(e.label, style: const TextStyle(fontSize: 15)),
+            trailing: Text(fmtTime(e.time),
+                style: const TextStyle(fontSize: 15)),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// 個人紀錄（小姐看自己的、管理員點進去看某個人的，都用這個）
+class RecordsView extends StatelessWidget {
+  final Hostess hostess;
+  final List<Widget> header; // 放在最上面的額外內容（管理員頁用）
+  const RecordsView({super.key, required this.hostess, this.header = const []});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = businessDay(DateTime.now());
+    final monthStart = DateTime(today.year, today.month, 1);
+    final monthEnd = DateTime(today.year, today.month + 1, 1);
+
+    final atts = store.attendances
+        .where((a) =>
+            a.hostessId == hostess.id &&
+            inRange(businessDay(a.clockIn), monthStart, monthEnd))
+        .toList()
+      ..sort((a, b) => b.clockIn.compareTo(a.clockIn));
+
+    final dispatchCount = store.dispatches
+        .where((d) =>
+            d.hostessId == hostess.id &&
+            inRange(businessDay(d.outTime), monthStart, monthEnd))
+        .length;
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        ...header,
+        Text('${today.month} 月統計',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            statBox('出勤', '${atts.length} 天'),
+            const SizedBox(width: 12),
+            statBox('外出', '$dispatchCount 次', color: Colors.orange),
+          ],
+        ),
+        sectionTitle('出勤明細'),
+        if (atts.isEmpty)
+          const Text('這個月還沒有出勤紀錄', style: TextStyle(color: Colors.grey)),
+        ...atts.map((a) {
+          final day = businessDay(a.clockIn);
+          final ds = store.dispatchesOnDay(hostess.id, day);
+          final timeText =
+              '${fmtTime(a.clockIn)} ～ ${a.clockOut == null ? '上班中' : fmtTime(a.clockOut!)}';
+          final outText = ds.isEmpty
+              ? '沒有外出'
+              : '外出 ${ds.length} 次：${ds.map((d) => d.place).join('、')}';
+          return Card(
+            color: Colors.white,
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ListTile(
+              title: Text(fmtDate(day),
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('$timeText\n$outText'),
+              isThreeLine: true,
+            ),
+          );
+        }),
+      ],
+    );
+  }
+}
+
+// ===================================================
+// 管理員端
+// ===================================================
+class AdminHome extends StatefulWidget {
+  const AdminHome({super.key});
+
+  @override
+  State<AdminHome> createState() => _AdminHomeState();
+}
+
+class _AdminHomeState extends State<AdminHome> {
+  int tab = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: pageBg,
+      appBar: blackBar('$appName 管理', actions: [logoutButton(context)]),
+      body: ListenableBuilder(
+        listenable: store,
+        builder: (context, _) {
+          if (tab == 0) return const AdminTodayView();
+          if (tab == 1) return const AdminStatsView();
+          return const RosterView();
+        },
+      ),
+      floatingActionButton: tab == 2
+          ? FloatingActionButton(
+              backgroundColor: gold,
+              foregroundColor: Colors.black,
+              onPressed: () => editHostessDialog(context, null),
+              child: const Icon(Icons.person_add),
+            )
+          : null,
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: tab,
+        selectedItemColor: Colors.black,
+        onTap: (i) => setState(() => tab = i),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.today), label: '今日'),
+          BottomNavigationBarItem(icon: Icon(Icons.bar_chart), label: '統計'),
+          BottomNavigationBarItem(icon: Icon(Icons.people), label: '名單'),
+        ],
+      ),
+    );
+  }
+}
+
+// 今日總覽
+class AdminTodayView extends StatelessWidget {
+  const AdminTodayView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = businessDay(DateTime.now());
+    final statuses = {
+      for (final h in store.hostesses) h.id: store.statusOf(h.id),
+    };
+    int count(WorkStatus s) => statuses.values.where((x) => x == s).length;
+    final cameToday = statuses.length - count(WorkStatus.notIn);
+    final todayDispatches =
+        store.dispatches.where((d) => businessDay(d.outTime) == today).length;
+
+    final sorted = [...store.hostesses]..sort((a, b) =>
+        statuses[a.id]!.sortRank.compareTo(statuses[b.id]!.sortRank));
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text('今日 ${fmtDate(today)}',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            statBox('今日上班', '$cameToday 人', color: gold),
+            const SizedBox(width: 8),
+            statBox('在店', '${count(WorkStatus.inStore)} 人',
+                color: Colors.green),
+            const SizedBox(width: 8),
+            statBox('外出中', '${count(WorkStatus.out)} 人',
+                color: Colors.orange),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            statBox('已下班', '${count(WorkStatus.off)} 人',
+                color: Colors.blueGrey),
+            const SizedBox(width: 8),
+            statBox('未到', '${count(WorkStatus.notIn)} 人', color: Colors.grey),
+            const SizedBox(width: 8),
+            statBox('今日外出', '$todayDispatches 次'),
+          ],
+        ),
+        sectionTitle('每個人目前狀態'),
+        ...sorted.map((h) {
+          final status = statuses[h.id]!;
+          final att = store.todayAttendance(h.id);
+          final cur = store.currentDispatch(h.id);
+          final n = store.dispatchesOnDay(h.id, today).length;
+          String detail;
+          switch (status) {
+            case WorkStatus.notIn:
+              detail = '尚未打卡';
+              break;
+            case WorkStatus.inStore:
+              detail = '上班 ${fmtTime(att!.clockIn)}・外出 $n 次';
+              break;
+            case WorkStatus.out:
+              detail = '外出中：${cur!.place}（${fmtTime(cur.outTime)} 出發）';
+              break;
+            case WorkStatus.off:
+              detail =
+                  '${fmtTime(att!.clockIn)} ～ ${fmtTime(att.clockOut!)}・外出 $n 次';
+              break;
+          }
+          return Card(
+            color: Colors.white,
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: status.color,
+                foregroundColor: Colors.white,
+                child: Text(h.name.isEmpty ? '?' : h.name.substring(0, 1)),
+              ),
+              title: Text(h.name),
+              subtitle: Text(detail),
+              trailing: StatusChip(status: status),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => HostessDetailPage(hostess: h)),
+              ),
+            ),
+          );
+        }),
+      ],
+    );
+  }
+}
+
+// 管理員點進某位小姐看紀錄
+class HostessDetailPage extends StatelessWidget {
+  final Hostess hostess;
+  const HostessDetailPage({super.key, required this.hostess});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: pageBg,
+      appBar: blackBar(hostess.name),
+      body: ListenableBuilder(
+        listenable: store,
+        builder: (context, _) => RecordsView(
+          hostess: hostess,
+          header: [
+            Text('手機：${hostess.phone}',
+                style: const TextStyle(color: Colors.grey)),
+            sectionTitle('今日紀錄'),
+            TodayTimeline(hostessId: hostess.id),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// 統計
+class AdminStatsView extends StatefulWidget {
+  const AdminStatsView({super.key});
+
+  @override
+  State<AdminStatsView> createState() => _AdminStatsViewState();
+}
+
+class _AdminStatsViewState extends State<AdminStatsView> {
+  String period = '近 7 天';
+
+  @override
+  Widget build(BuildContext context) {
+    final today = businessDay(DateTime.now());
+    DateTime start;
+    DateTime end;
+    if (period == '近 7 天') {
+      start = DateTime(today.year, today.month, today.day - 6);
+      end = DateTime(today.year, today.month, today.day + 1);
+    } else if (period == '本月') {
+      start = DateTime(today.year, today.month, 1);
+      end = DateTime(today.year, today.month, today.day + 1);
+    } else {
+      start = DateTime(today.year, today.month - 1, 1);
+      end = DateTime(today.year, today.month, 1);
+    }
+
+    final atts = store.attendances
+        .where((a) => inRange(businessDay(a.clockIn), start, end))
+        .toList();
+    final ds = store.dispatches
+        .where((d) => inRange(businessDay(d.outTime), start, end))
+        .toList();
+
+    // 每天上班人數（新的在上面）
+    final days = <DateTime>[];
+    for (var d = DateTime(end.year, end.month, end.day - 1);
+        !d.isBefore(start);
+        d = DateTime(d.year, d.month, d.day - 1)) {
+      days.add(d);
+    }
+    final dailyCount = {
+      for (final d in days)
+        d: atts.where((a) => businessDay(a.clockIn) == d).length,
+    };
+    final maxCount = store.hostesses.isEmpty ? 1 : store.hostesses.length;
+    final average = days.isEmpty ? 0 : atts.length / days.length;
+
+    // 每個人
+    final personal = store.hostesses.map((h) {
+      final dayCount = atts.where((a) => a.hostessId == h.id).length;
+      final outCount = ds.where((d) => d.hostessId == h.id).length;
+      return (name: h.name, days: dayCount, outs: outCount);
+    }).toList()
+      ..sort((a, b) => b.days.compareTo(a.days));
+
+    // 外出地點
+    final placeCount = <String, int>{};
+    for (final d in ds) {
+      placeCount[d.place] = (placeCount[d.place] ?? 0) + 1;
+    }
+    final places = placeCount.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Wrap(
+          spacing: 8,
+          children: ['近 7 天', '本月', '上月'].map((p) {
+            return ChoiceChip(
+              label: Text(p),
+              selected: period == p,
+              onSelected: (_) => setState(() => period = p),
+            );
+          }).toList(),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            statBox('出勤人次', '${atts.length}', color: gold),
+            const SizedBox(width: 8),
+            statBox('平均每天', average.toStringAsFixed(1)),
+            const SizedBox(width: 8),
+            statBox('外出次數', '${ds.length}', color: Colors.orange),
+          ],
+        ),
+
+        sectionTitle('每日上班人數'),
+        Card(
+          color: Colors.white,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: days.map((d) {
+                final n = dailyCount[d]!;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      SizedBox(width: 82, child: Text(fmtDate(d))),
+                      Expanded(
+                        child: LinearProgressIndicator(
+                          value: n / maxCount,
+                          minHeight: 10,
+                          color: gold,
+                          backgroundColor: Colors.grey.shade200,
+                        ),
+                      ),
+                      SizedBox(
+                        width: 44,
+                        child: Text('$n 人', textAlign: TextAlign.right),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ),
+
+        sectionTitle('個人統計'),
+        Card(
+          color: Colors.white,
+          child: Column(
+            children: [
+              const ListTile(
+                dense: true,
+                title: Text('名字', style: TextStyle(color: Colors.grey)),
+                trailing: SizedBox(
+                  width: 140,
+                  child: Row(
+                    children: [
+                      Expanded(
+                          child: Text('出勤',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey))),
+                      Expanded(
+                          child: Text('外出',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey))),
+                    ],
+                  ),
+                ),
+              ),
+              const Divider(height: 1),
+              ...personal.map((p) => ListTile(
+                    title: Text(p.name),
+                    trailing: SizedBox(
+                      width: 140,
+                      child: Row(
+                        children: [
+                          Expanded(
+                              child: Text('${p.days} 天',
+                                  textAlign: TextAlign.center)),
+                          Expanded(
+                              child: Text('${p.outs} 次',
+                                  textAlign: TextAlign.center)),
+                        ],
+                      ),
+                    ),
+                  )),
+            ],
+          ),
+        ),
+
+        sectionTitle('外出地點'),
+        Card(
+          color: Colors.white,
+          child: places.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('沒有外出紀錄', style: TextStyle(color: Colors.grey)),
+                )
+              : Column(
+                  children: places
+                      .map((e) => ListTile(
+                            leading: const Icon(Icons.place,
+                                color: Colors.orange),
+                            title: Text(e.key),
+                            trailing: Text('${e.value} 次',
+                                style: const TextStyle(fontSize: 16)),
+                          ))
+                      .toList(),
+                ),
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+}
+
+// 名單管理
+class RosterView extends StatelessWidget {
+  const RosterView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (store.hostesses.isEmpty) {
+      return const Center(child: Text('還沒有人，按右下角＋新增'));
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
+      children: [
+        Text('共 ${store.hostesses.length} 人',
+            style: const TextStyle(color: Colors.grey)),
+        const SizedBox(height: 8),
+        ...store.hostesses.map((h) => Card(
+              color: Colors.white,
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: gold,
+                  foregroundColor: Colors.black,
+                  child: Text(h.name.isEmpty ? '?' : h.name.substring(0, 1)),
+                ),
+                title: Text(h.name),
+                subtitle: Text(h.phone),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit),
+                      onPressed: () => editHostessDialog(context, h),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () async {
+                        final ok = await confirmDialog(
+                            context, '刪除', '確定要刪除「${h.name}」嗎？\n（過去的紀錄會保留）');
+                        if (ok) store.removeHostess(h);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            )),
+      ],
+    );
+  }
+}
+
+// 新增／編輯小姐
+Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
+  final nameController = TextEditingController(text: h?.name ?? '');
+  final phoneController = TextEditingController(text: h?.phone ?? '');
+  String? error;
+
+  await showDialog(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (dialogContext, setDialogState) => AlertDialog(
+        title: Text(h == null ? '新增小姐' : '編輯資料'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(labelText: '名字／代號'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: phoneController,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: '手機號碼（登入用）'),
+            ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(error!, style: const TextStyle(color: Colors.red)),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              final phone = phoneController.text.trim();
+              String? e;
+              if (name.isEmpty) {
+                e = '請輸入名字';
+              } else if (!RegExp(r'^09\d{8}$').hasMatch(phone)) {
+                e = '手機號碼格式錯誤（09 開頭，共 10 碼）';
+              } else {
+                final other = store.findByPhone(phone);
+                if (other != null && other != h) e = '這個手機號碼已經有人用了';
+              }
+              if (e != null) {
+                setDialogState(() => error = e);
+                return;
+              }
+              if (h == null) {
+                store.addHostess(name, phone);
+              } else {
+                store.updateHostess(h, name, phone);
+              }
+              Navigator.pop(dialogContext);
+            },
+            child: const Text('儲存'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
 
