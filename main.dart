@@ -165,7 +165,15 @@ class Hostess {
   final String id;
   String name;
   String phone;
-  Hostess({required this.id, required this.name, required this.phone});
+  String password;
+  bool approved; // 自己註冊的帳號要管理員核准才能登入
+  Hostess({
+    required this.id,
+    required this.name,
+    required this.phone,
+    required this.password,
+    this.approved = true,
+  });
 }
 
 // 一次上班（打卡上班 ～ 打卡下班）
@@ -362,14 +370,42 @@ class AppStore extends ChangeNotifier {
   }
 
   // ---------- 名單管理 ----------
-  void addHostess(String name, String phone) {
-    hostesses.add(Hostess(id: _newId(), name: name, phone: phone));
+  // 已核准的人（今日、統計只算這些人）
+  List<Hostess> get approvedHostesses =>
+      hostesses.where((h) => h.approved).toList();
+
+  // 等待核准的新註冊
+  List<Hostess> get pendingHostesses =>
+      hostesses.where((h) => !h.approved).toList();
+
+  // 管理員新增：直接核准
+  void addHostess(String name, String phone, String password) {
+    hostesses.add(Hostess(
+        id: _newId(), name: name, phone: phone, password: password));
     notifyListeners();
   }
 
-  void updateHostess(Hostess h, String name, String phone) {
+  // 小姐自己註冊：等管理員核准
+  void registerHostess(String name, String phone, String password) {
+    hostesses.add(Hostess(
+      id: _newId(),
+      name: name,
+      phone: phone,
+      password: password,
+      approved: false,
+    ));
+    notifyListeners();
+  }
+
+  void approveHostess(Hostess h) {
+    h.approved = true;
+    notifyListeners();
+  }
+
+  void updateHostess(Hostess h, String name, String phone, String password) {
     h.name = name;
     h.phone = phone;
+    if (password.isNotEmpty) h.password = password; // 空白 = 不改密碼
     notifyListeners();
   }
 
@@ -382,18 +418,31 @@ class AppStore extends ChangeNotifier {
   void _seed() {
     const names = ['小美', '小雪', '小琪', '小婷', '小安', '小玲'];
     for (var i = 0; i < names.length; i++) {
-      hostesses.add(
-          Hostess(id: _newId(), name: names[i], phone: '09110000${two(i + 1)}'));
+      hostesses.add(Hostess(
+        id: _newId(),
+        name: names[i],
+        phone: '09110000${two(i + 1)}',
+        password: '123456',
+      ));
     }
+    // 一位剛註冊、等待核准的（測試用）
+    hostesses.add(Hostess(
+      id: _newId(),
+      name: '小芳',
+      phone: '0911000007',
+      password: '123456',
+      approved: false,
+    ));
+    final working = approvedHostesses; // 下面的測試紀錄只給已核准的人
 
     final today = businessDay(DateTime.now());
 
     // 過去 40 天的紀錄
     for (var d = 1; d <= 40; d++) {
       final day = DateTime(today.year, today.month, today.day - d);
-      for (var i = 0; i < hostesses.length; i++) {
+      for (var i = 0; i < working.length; i++) {
         if ((d + i) % 3 == 0) continue; // 有幾天休假
-        final h = hostesses[i];
+        final h = working[i];
         final inTime = day.add(Duration(hours: 20, minutes: i * 7));
         final outTime = day.add(Duration(hours: 27, minutes: i * 5));
         attendances.add(
@@ -508,8 +557,8 @@ class _LoginPageState extends State<LoginPage> {
     }
 
     if (isAdmin) {
-      if (account != 'admin') {
-        toast(context, '管理員帳號錯誤（測試帳號：admin）');
+      if (account != 'admin' || password != '123456') {
+        toast(context, '管理員帳號或密碼錯誤');
         return;
       }
       Navigator.pushReplacement(
@@ -519,7 +568,15 @@ class _LoginPageState extends State<LoginPage> {
     } else {
       final h = store.findByPhone(account);
       if (h == null) {
-        toast(context, '查無此手機號碼，請聯絡管理員新增');
+        toast(context, '查無此手機號碼，請先註冊');
+        return;
+      }
+      if (h.password != password) {
+        toast(context, '密碼錯誤');
+        return;
+      }
+      if (!h.approved) {
+        toast(context, '帳號審核中，請等管理員核准');
         return;
       }
       Navigator.pushReplacement(
@@ -658,9 +715,32 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 28),
+                if (!isAdmin)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text('還沒有帳號？',
+                          style: TextStyle(color: Colors.white)),
+                      TextButton(
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const RegisterPage()),
+                        ),
+                        child: const Text(
+                          '註冊',
+                          style: TextStyle(
+                            color: gold,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                const SizedBox(height: 20),
                 const Text(
-                  '測試帳號\n小姐：0911000001 ～ 0911000006\n管理員：admin\n密碼：任意 6 碼以上',
+                  '測試帳號\n小姐：0911000001 ～ 0911000006\n管理員：admin\n密碼都是：123456',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.white38, height: 1.6),
                 ),
@@ -997,35 +1077,52 @@ class _AdminHomeState extends State<AdminHome> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: pageBg,
-      appBar: blackBar('$appName 管理', actions: [logoutButton(context)]),
-      body: ListenableBuilder(
-        listenable: store,
-        builder: (context, _) {
-          if (tab == 0) return const AdminTodayView();
-          if (tab == 1) return const AdminStatsView();
-          return const RosterView();
-        },
-      ),
-      floatingActionButton: tab == 2
-          ? FloatingActionButton(
-              backgroundColor: gold,
-              foregroundColor: Colors.black,
-              onPressed: () => editHostessDialog(context, null),
-              child: const Icon(Icons.person_add),
-            )
-          : null,
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: tab,
-        selectedItemColor: Colors.black,
-        onTap: (i) => setState(() => tab = i),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.today), label: '今日'),
-          BottomNavigationBarItem(icon: Icon(Icons.bar_chart), label: '統計'),
-          BottomNavigationBarItem(icon: Icon(Icons.people), label: '名單'),
-        ],
-      ),
+    // 整個畫面都跟著 store 更新（名單上的待審核數字才會即時變）
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final pending = store.pendingHostesses.length;
+        Widget body;
+        if (tab == 0) {
+          body = const AdminTodayView();
+        } else if (tab == 1) {
+          body = const AdminStatsView();
+        } else {
+          body = const RosterView();
+        }
+        return Scaffold(
+          backgroundColor: pageBg,
+          appBar: blackBar('$appName 管理', actions: [logoutButton(context)]),
+          body: body,
+          floatingActionButton: tab == 2
+              ? FloatingActionButton(
+                  backgroundColor: gold,
+                  foregroundColor: Colors.black,
+                  onPressed: () => editHostessDialog(context, null),
+                  child: const Icon(Icons.person_add),
+                )
+              : null,
+          bottomNavigationBar: BottomNavigationBar(
+            currentIndex: tab,
+            selectedItemColor: Colors.black,
+            onTap: (i) => setState(() => tab = i),
+            items: [
+              const BottomNavigationBarItem(
+                  icon: Icon(Icons.today), label: '今日'),
+              const BottomNavigationBarItem(
+                  icon: Icon(Icons.bar_chart), label: '統計'),
+              BottomNavigationBarItem(
+                icon: Badge(
+                  isLabelVisible: pending > 0,
+                  label: Text('$pending'),
+                  child: const Icon(Icons.people),
+                ),
+                label: '名單',
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -1038,14 +1135,14 @@ class AdminTodayView extends StatelessWidget {
   Widget build(BuildContext context) {
     final today = businessDay(DateTime.now());
     final statuses = {
-      for (final h in store.hostesses) h.id: store.statusOf(h.id),
+      for (final h in store.approvedHostesses) h.id: store.statusOf(h.id),
     };
     int count(WorkStatus s) => statuses.values.where((x) => x == s).length;
     final cameToday = statuses.length - count(WorkStatus.notIn);
     final todayDispatches =
         store.dispatches.where((d) => businessDay(d.outTime) == today).length;
 
-    final sorted = [...store.hostesses]..sort((a, b) =>
+    final sorted = store.approvedHostesses..sort((a, b) =>
         statuses[a.id]!.sortRank.compareTo(statuses[b.id]!.sortRank));
 
     return ListView(
@@ -1194,11 +1291,12 @@ class _AdminStatsViewState extends State<AdminStatsView> {
       for (final d in days)
         d: atts.where((a) => businessDay(a.clockIn) == d).length,
     };
-    final maxCount = store.hostesses.isEmpty ? 1 : store.hostesses.length;
+    final maxCount =
+        store.approvedHostesses.isEmpty ? 1 : store.approvedHostesses.length;
     final average = days.isEmpty ? 0 : atts.length / days.length;
 
     // 每個人
-    final personal = store.hostesses.map((h) {
+    final personal = store.approvedHostesses.map((h) {
       final dayCount = atts.where((a) => a.hostessId == h.id).length;
       final outCount = ds.where((d) => d.hostessId == h.id).length;
       return (name: h.name, days: dayCount, outs: outCount);
@@ -1345,26 +1443,79 @@ class _AdminStatsViewState extends State<AdminStatsView> {
 class RosterView extends StatelessWidget {
   const RosterView({super.key});
 
+  Widget avatar(Hostess h, Color color) {
+    return CircleAvatar(
+      backgroundColor: color,
+      foregroundColor: Colors.black,
+      child: Text(h.name.isEmpty ? '?' : h.name.substring(0, 1)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (store.hostesses.isEmpty) {
-      return const Center(child: Text('還沒有人，按右下角＋新增'));
-    }
+    final pending = store.pendingHostesses;
+    final approved = store.approvedHostesses;
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
       children: [
-        Text('共 ${store.hostesses.length} 人',
-            style: const TextStyle(color: Colors.grey)),
+        // ---------- 待審核 ----------
+        if (pending.isNotEmpty) ...[
+          Text('新註冊待審核（${pending.length}）',
+              style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.red)),
+          const SizedBox(height: 8),
+          ...pending.map((h) => Card(
+                color: Colors.orange.shade50,
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: avatar(h, Colors.orange.shade200),
+                  title: Text(h.name),
+                  subtitle: Text(h.phone),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextButton(
+                        onPressed: () async {
+                          final ok = await confirmDialog(
+                              context, '拒絕', '確定拒絕「${h.name}」的註冊？');
+                          if (ok) store.removeHostess(h);
+                        },
+                        child: const Text('拒絕',
+                            style: TextStyle(color: Colors.red)),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          store.approveHostess(h);
+                          toast(context, '已核准「${h.name}」');
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                        ),
+                        child: const Text('核准'),
+                      ),
+                    ],
+                  ),
+                ),
+              )),
+          const SizedBox(height: 16),
+        ],
+
+        // ---------- 已核准 ----------
+        Text('名單（共 ${approved.length} 人）',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
-        ...store.hostesses.map((h) => Card(
+        if (approved.isEmpty)
+          const Text('還沒有人，按右下角＋新增',
+              style: TextStyle(color: Colors.grey)),
+        ...approved.map((h) => Card(
               color: Colors.white,
               margin: const EdgeInsets.only(bottom: 8),
               child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: gold,
-                  foregroundColor: Colors.black,
-                  child: Text(h.name.isEmpty ? '?' : h.name.substring(0, 1)),
-                ),
+                leading: avatar(h, gold),
                 title: Text(h.name),
                 subtitle: Text(h.phone),
                 trailing: Row(
@@ -1391,10 +1542,11 @@ class RosterView extends StatelessWidget {
   }
 }
 
-// 新增／編輯小姐
+// 新增／編輯小姐（管理員用）
 Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
   final nameController = TextEditingController(text: h?.name ?? '');
   final phoneController = TextEditingController(text: h?.phone ?? '');
+  final passwordController = TextEditingController();
   String? error;
 
   await showDialog(
@@ -1402,25 +1554,35 @@ Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
     builder: (dialogContext) => StatefulBuilder(
       builder: (dialogContext, setDialogState) => AlertDialog(
         title: Text(h == null ? '新增小姐' : '編輯資料'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: '名字／代號'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: phoneController,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(labelText: '手機號碼（登入用）'),
-            ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Text(error!, style: const TextStyle(color: Colors.red)),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: '名字／代號'),
               ),
-          ],
+              const SizedBox(height: 8),
+              TextField(
+                controller: phoneController,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: '手機號碼（登入用）'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: passwordController,
+                decoration: InputDecoration(
+                  labelText: h == null ? '密碼（至少 6 碼）' : '新密碼（不改請留空）',
+                ),
+              ),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child:
+                      Text(error!, style: const TextStyle(color: Colors.red)),
+                ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1431,11 +1593,18 @@ Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
             onPressed: () {
               final name = nameController.text.trim();
               final phone = phoneController.text.trim();
+              final password = passwordController.text;
               String? e;
               if (name.isEmpty) {
                 e = '請輸入名字';
               } else if (!RegExp(r'^09\d{8}$').hasMatch(phone)) {
                 e = '手機號碼格式錯誤（09 開頭，共 10 碼）';
+              } else if (h == null && password.length < 6) {
+                e = '密碼至少 6 碼';
+              } else if (h != null &&
+                  password.isNotEmpty &&
+                  password.length < 6) {
+                e = '新密碼至少 6 碼';
               } else {
                 final other = store.findByPhone(phone);
                 if (other != null && other != h) e = '這個手機號碼已經有人用了';
@@ -1445,9 +1614,9 @@ Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
                 return;
               }
               if (h == null) {
-                store.addHostess(name, phone);
+                store.addHostess(name, phone, password);
               } else {
-                store.updateHostess(h, name, phone);
+                store.updateHostess(h, name, phone, password);
               }
               Navigator.pop(dialogContext);
             },
@@ -1457,5 +1626,151 @@ Future<void> editHostessDialog(BuildContext context, Hostess? h) async {
       ),
     ),
   );
+}
+
+// ===================================================
+// 註冊頁（小姐自己註冊，管理員核准後才能登入）
+// ===================================================
+class RegisterPage extends StatefulWidget {
+  const RegisterPage({super.key});
+
+  @override
+  State<RegisterPage> createState() => _RegisterPageState();
+}
+
+class _RegisterPageState extends State<RegisterPage> {
+  final nameController = TextEditingController();
+  final phoneController = TextEditingController();
+  final passwordController = TextEditingController();
+  final confirmController = TextEditingController();
+  bool hidePassword = true;
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    phoneController.dispose();
+    passwordController.dispose();
+    confirmController.dispose();
+    super.dispose();
+  }
+
+  Future<void> register() async {
+    final name = nameController.text.trim();
+    final phone = phoneController.text.trim();
+    final password = passwordController.text;
+
+    if (name.isEmpty || phone.isEmpty || password.isEmpty) {
+      toast(context, '請填寫所有欄位');
+      return;
+    }
+    if (!RegExp(r'^09\d{8}$').hasMatch(phone)) {
+      toast(context, '手機號碼格式錯誤（09 開頭，共 10 碼）');
+      return;
+    }
+    if (password.length < 6) {
+      toast(context, '密碼至少 6 碼');
+      return;
+    }
+    if (password != confirmController.text) {
+      toast(context, '兩次輸入的密碼不一樣');
+      return;
+    }
+    if (store.findByPhone(phone) != null) {
+      toast(context, '這個手機號碼已經註冊過了');
+      return;
+    }
+
+    store.registerHostess(name, phone, password);
+
+    await showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('註冊成功'),
+        content: const Text('已送出申請，管理員核准後就可以用手機號碼登入。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) Navigator.pop(context); // 回登入頁
+  }
+
+  Widget field(String label, TextEditingController controller,
+      {bool obscure = false, TextInputType keyboardType = TextInputType.text}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label),
+          const SizedBox(height: 6),
+          TextField(
+            controller: controller,
+            obscureText: obscure,
+            keyboardType: keyboardType,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              isDense: true,
+              filled: true,
+              fillColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: pageBg,
+      appBar: blackBar('註冊帳號'),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          field('*名字／代號', nameController),
+          field('*手機號碼（之後用來登入）', phoneController,
+              keyboardType: TextInputType.phone),
+          field('*密碼（至少 6 碼）', passwordController, obscure: hidePassword),
+          field('*再輸入一次密碼', confirmController, obscure: hidePassword),
+          Row(
+            children: [
+              Checkbox(
+                value: !hidePassword,
+                onChanged: (v) => setState(() => hidePassword = !(v ?? false)),
+              ),
+              const Text('顯示密碼'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton(
+              onPressed: register,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black,
+                foregroundColor: gold,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+              child: const Text('送出註冊',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            '送出後需要管理員核准，核准後才能登入打卡。',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
