@@ -57,7 +57,7 @@ class _MainPageState extends State<MainPage> {
           children: [
             Icon(Icons.directions_car),
             SizedBox(width: 8),
-            Text('24h派車'),
+            Text('金爵國際'),
           ],
         ),
       ),
@@ -520,7 +520,7 @@ class _LoginPageState extends State<LoginPage> {
               children: [
                 const Icon(Icons.directions_car, size: 100, color: Colors.white),
                 const Text(
-                  '24h派車',
+                  '金爵國際',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 36,
@@ -1245,3 +1245,4 @@ class _TopUpRecordsPageState extends State<TopUpRecordsPage> {
     );
   }
 }
+
